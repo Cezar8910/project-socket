@@ -2,7 +2,6 @@ import socket
 import threading
 import time
 
-# O servidor envia uma pergunta a todos os clientes. As perguntas devem ser configuradas previamente no código e deve ser escolhido como multipla-escolha entre as opções [A, B, C e D].
 questions = [
     {
         "question": "1) Qual camada do modelo OSI é responsável pelo roteamento dos pacotes?\n"
@@ -31,27 +30,23 @@ questions = [
     },
 ]
 
-
 HOST = '127.0.0.1'
 PORT = 12345
+NUM_FIXED_CLIENTS = 3
 
-# Dicionário para armazenar conexões de clientes e seus nomes
-clients_data = {}
+clients_data = {}  # {conn: name}
 scores = {}
-
+server_running = True
 lock = threading.Lock()
 
 def broadcast(msg):
-    # Envia uma mensagem para todos os clientes conectados
-    for conn in clients_data:
+    for conn in list(clients_data.keys()):
         try:
             conn.sendall(msg.encode())
-        except Exception as e:
-            print(f"Erro ao enviar mensagem para um cliente: {e}")
-            remove_client(conn)
+        except:
+            continue
 
 def remove_client(conn):
-    # Remove um cliente da lista de clientes ativos
     with lock:
         if conn in clients_data:
             name = clients_data[conn]
@@ -59,130 +54,121 @@ def remove_client(conn):
             del clients_data[conn]
             if name in scores:
                 del scores[name]
-            conn.close()
+            try:
+                conn.close()
+            except:
+                pass
 
 def handle_client(conn, addr, name):
     print(f"[+] {name} conectado de {addr}")
-    scores[name] = 0.0 
-
+    scores[name] = 0.0
     try:
-        while True:
+        while server_running:
             time.sleep(1)
-    except Exception as e:
-        print(f"Erro na comunicação com {name}: {e}")
+    except:
+        pass
     finally:
         remove_client(conn)
 
 def game_round():
-    # Inicia o jogo após um pequeno atraso para que os clientes se preparem
-    print("\n[+] Jogo começando em 5 segundos...")
-    broadcast("O quiz vai começar em 5 segundos! Prepare-se para responder.")
+    global server_running
+    broadcast("O quiz vai começar em 5 segundos!")
+    print("[+] Iniciando o quiz em 5s...")
     time.sleep(5)
 
     for i, q in enumerate(questions):
+        if not server_running:
+            break
+
         print(f"\n--- [Rodada {i+1}] ---")
-        question_msg = f"\n{q['question']}\nSua resposta (A, B, C ou D): "
-        broadcast(question_msg) # Envia a pergunta para todos os clientes
+        broadcast(f"\n{q['question']}\nSua resposta (A, B, C ou D):")
 
-        round_answers = {} # Para coletar as respostas desta rodada {name: answer}
+        round_answers = {}
         start_time = time.time()
-        round_duration = 15 # Tempo para responder cada pergunta (em segundos)
 
-        # Coleta respostas dos clientes por um tempo limitado
-        while time.time() - start_time < round_duration:
+        while time.time() - start_time < 15:
+            time.sleep(0.01)
             with lock:
                 for conn, name in list(clients_data.items()):
                     try:
-                        # Timeout para a operação de recebimento
-                        conn.settimeout(0.1)
-                  
+                        conn.settimeout(0.2)
                         data = conn.recv(1024).decode().strip()
                         if data:
-                            parts = data.split(":", 1) 
+                            parts = data.split(":", 1)
                             if len(parts) == 2:
                                 client_name, answer = parts
-                                if client_name == name and answer.upper() in ["A", "B", "C", "D"] and name not in round_answers:
-                                    round_answers[name] = answer.upper()
-                            else:
-                                print(f"Formato de dado inválido de {name}: {data}")
+                                if client_name == name and answer.upper() in ["A", "B", "C", "D"]:
+                                    if name not in round_answers:
+                                        round_answers[name] = answer.upper()
+                                        print(f"[+] {name} respondeu: {answer.upper()}")
                     except socket.timeout:
-                        continue # Não há dados no momento, tenta o próximo cliente
+                        continue
                     except Exception as e:
-                        print(f"Erro ao receber dados de {name}: {e}")
-                        remove_client(conn) # Remove cliente "problemático"
-        
-        # Avalia as respostas após o tempo limite
-        correct_answers_in_round = []
-        for name, ans in round_answers.items():
-            if ans == q["answer"]:
-                correct_answers_in_round.append(name)
-        
-        # Atribui pontos. O primeiro a responder corretamente ganha mais.
-        for idx, name in enumerate(correct_answers_in_round):
-            score_to_add = max(1.0 - idx * 0.1, 0)
-            scores[name] += score_to_add
-            
-        print(f"Respostas corretas nesta rodada: {correct_answers_in_round}")
-        
-        # Envia o placar parcial
-        placar = "\n".join([f"{p}: {s:.1f} pontos" for p, s in scores.items()])
-        broadcast(f"\n--- Placar Parcial ---\n{placar}\n")
-        
-        # Aguarda um pouco antes da próxima pergunta
-        print(f"Aguardando 5s para a próxima rodada...")
+                        print(f"[!] Erro com {name} (ignorado): {e}")
+
+        correct = [name for name, ans in round_answers.items() if ans == q["answer"]]
+        for idx, name in enumerate(correct):
+            scores[name] += max(1.0 - idx * 0.1, 0)
+
+        placar = "\n".join([f"{n}: {s:.1f} pontos" for n, s in scores.items()])
+        print(f"\n>>> Respostas corretas: {correct}")
+        broadcast(f"\n--- Placar parcial ---\n{placar}")
         time.sleep(5)
 
     print("\n[+] Fim do quiz!")
-    final_score_msg = "O quiz acabou! Placar Final:\n" + "\n".join([f"{p}: {s:.1f} pontos" for p, s in scores.items()])
-    broadcast(final_score_msg)
-
+    broadcast("O Quiz acabou! Placar final:\n" + "\n".join([f"{n}: {s:.1f} pontos" for n, s in scores.items()]))
+    server_running = False
+    time.sleep(1)
     for conn in list(clients_data.keys()):
-        conn.close()
-    print("Servidor encerrado.")
-
+        try:
+            conn.close()
+        except:
+            pass
+    print("[*] Servidor finalizado.")
 
 def start_server():
+    global server_running
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.bind((HOST, PORT))
-    server.listen(5) 
+    server.listen(5)
 
-    print("[*] Servidor ouvindo em %s:%d" % (HOST, PORT))
-    print("[*] Aguardando conexões de jogadores...")
+    print(f"[*] Servidor ouvindo em {HOST}:{PORT}")
+    print("[*] Aguardando conexões...")
 
-    start_wait = time.time()
-    
-    while True:
-        try:
-            conn, addr = server.accept()
-            conn.settimeout(10) # Tempo para o cliente enviar o nome
-            name = conn.recv(1024).decode().strip()
-            
-            if name:
-                with lock:
-                    clients_data[conn] = name
-                # Inicia uma thread para lidar com o cliente recém-conectado
-                thread = threading.Thread(target=handle_client, args=(conn, addr, name))
-                thread.daemon = True # A thread será encerrada quando a principal for encerrada
-                thread.start()
-                print(f"[+] Jogador '{name}' ({addr}) conectado.")
-            else:
-                print(f"[-] Conexão de {addr} recusada: Nome não fornecido.")
-                conn.close()
-        except socket.timeout:
-            print("[*] Tempo limite para receber nome excedido para uma conexão.")
-            continue
-        except Exception as e:
-            print(f"Erro ao aceitar conexão: {e}")
-            break
+    game_thread = None
 
-        if len(clients_data) >= 1 and (time.time() - start_wait > 10 or len(clients_data) >= 2):
-            print("\n[*] Número mínimo de jogadores ou tempo limite atingido. Iniciando o jogo!\n")
-            # Agora, o jogo rodará em uma nova thread para não bloquear a aceitação de novas conexões
-            game_thread = threading.Thread(target=game_round)
-            game_thread.start()
-            break 
-    
-    game_thread.join() # Aguarda o término do quiz antes de encerrar o servidor
+    try:
+        while server_running:
+            try:
+                server.settimeout(0.5)
+                conn, addr = server.accept()
+                conn.settimeout(10)
+                name = conn.recv(1024).decode().strip()
+                if name:
+                    with lock:
+                        clients_data[conn] = name
+                    thread = threading.Thread(target=handle_client, args=(conn, addr, name))
+                    thread.daemon = True
+                    thread.start()
+                    print(f"[+] '{name}' conectado.")
+            except socket.timeout:
+                pass
+            except Exception as e:
+                print(f"[!] Erro na aceitação: {e}")
 
-# Chamada para iniciar o servidor
+
+            if len(clients_data) >= NUM_FIXED_CLIENTS:
+                print("[*] Iniciando jogo!")
+                game_thread = threading.Thread(target=game_round)
+                game_thread.start()
+                break
+
+    except KeyboardInterrupt:
+        print("\n[!] Interrompido manualmente.")
+        server_running = False
+    finally:
+        if game_thread:
+            game_thread.join()
+        server.close()
+
 start_server()
